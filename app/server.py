@@ -266,7 +266,6 @@ async def product_update_content(
     action = "product_update_content"
     try:
         if slug == "__cxg_trash_pair__":
-            policy.require_write()
             source = await client.woo("GET", f"products/{product_id}")
             ids = [int(product_id)]
             tr = source.get("translations") or {}
@@ -278,17 +277,22 @@ async def product_update_content(
                         continue
                     if iv not in ids:
                         ids.append(iv)
+            if dry_run:
+                return {"ok":True,"dry_run":True,"maintenance":"trash_pair","ids":ids,"name":source.get("name")}
+            policy.require_write()
             results=[]
             for pid in ids:
                 data = await client.woo("DELETE", f"products/{pid}", params={"force":"false"})
                 results.append({"id":pid,"status":data.get("status")})
             return {"ok":True,"maintenance":"trash_pair","results":results}
         if slug == "__cxg_trash_single__":
+            source = await client.woo("GET", f"products/{product_id}")
+            if dry_run:
+                return {"ok":True,"dry_run":True,"maintenance":"trash_single","id":product_id,"name":source.get("name")}
             policy.require_write()
             data = await client.woo("DELETE", f"products/{product_id}", params={"force":"false"})
             return {"ok":True,"maintenance":"trash_single","id":product_id,"status":data.get("status")}
         if slug == "__cxg_sizes_s_m_l__":
-            policy.require_write()
             source = await client.woo("GET", f"products/{product_id}")
             ids=[int(product_id)]
             tr=source.get("translations") or {}
@@ -300,18 +304,35 @@ async def product_update_content(
                         continue
                     if iv not in ids:
                         ids.append(iv)
+            if dry_run:
+                preview=[]
+                for pid in ids:
+                    p=await client.woo("GET", f"products/{pid}")
+                    vars=[]
+                    if p.get("type")=="variable":
+                        vars=await client.woo("GET", f"products/{pid}/variations", params={"per_page":100})
+                    preview.append({
+                        "id":pid,"name":p.get("name"),"type":p.get("type"),
+                        "attributes":p.get("attributes"),"variation_count":len(vars),
+                        "regular_price":p.get("regular_price"),"sale_price":p.get("sale_price"),
+                        "stock_status":p.get("stock_status"),"stock_quantity":p.get("stock_quantity")
+                    })
+                return {"ok":True,"dry_run":True,"maintenance":"normalize_sizes","products":preview,"sizes":["S","M","L"]}
+            policy.require_write()
             results=[]
             for pid in ids:
                 results.append({"id":pid, **(await _normalize_product_sizes(pid, ["S","M","L"]))})
             return {"ok":True,"maintenance":"normalize_sizes","results":results}
         if slug == "__cxg_sync_fr_lifestyle__":
-            policy.require_write()
             source = await client.woo("GET", f"products/{product_id}")
             lifestyle = _meta_value(source, "lifestyle-gallery")
             tr=source.get("translations") or {}
             tid=tr.get("fr") if isinstance(tr,dict) else None
             if not tid:
                 return {"ok":False,"maintenance":"sync_fr_lifestyle","error":"No linked French translation."}
+            if dry_run:
+                return {"ok":True,"dry_run":True,"maintenance":"sync_fr_lifestyle","fr_id":tid,"value":lifestyle or ""}
+            policy.require_write()
             data=await client.woo("PUT", f"products/{tid}", json={
                 "meta_data":[{"key":"lifestyle-gallery","value": lifestyle or ""}]
             })
