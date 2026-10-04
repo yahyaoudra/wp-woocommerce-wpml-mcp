@@ -401,6 +401,143 @@ async def product_update_content(
                 except Exception as ne:
                     results.append({"source_id":item["id"],"ok":False,"error":str(ne)})
             return {"ok":all(x.get("ok") for x in results),"maintenance":"normalize_split_apparel","results":results}
+        if slug == "__cxg_audit_multicolor_missing_sizes__":
+            apparel_categories = {
+                "T-shirts","Tops","Joggers","Shorts","Hoodies","Bodysuits",
+                "Sweater","Skirt","Bottoms","Swim Shorts","Lifestyle"
+            }
+            rows_out=[]
+            page=1
+            while True:
+                rows=await client.woo("GET","products",params={"lang":"en","status":"any","per_page":100,"page":page})
+                if not rows:
+                    break
+                for p in rows:
+                    pid=int(p.get("id") or 0)
+                    if not pid or pid == 4242:
+                        continue
+                    cats={str(x.get("name") or "") for x in (p.get("categories") or [])}
+                    if not (cats & apparel_categories):
+                        continue
+                    attrs=p.get("attributes") or []
+                    color_attr=next((a for a in attrs if int(a.get("id") or 0)==1 or str(a.get("name") or "").casefold() in ("color","couleur")),None)
+                    size_attr=next((a for a in attrs if int(a.get("id") or 0)==3 or str(a.get("name") or "").casefold() in ("size","taille")),None)
+                    color_opts=list((color_attr or {}).get("options") or [])
+                    size_opts=list((size_attr or {}).get("options") or [])
+                    if len(color_opts)>1 and not size_opts:
+                        rows_out.append({"id":pid,"name":p.get("name"),"color_options":color_opts,"categories":sorted(cats)})
+                if len(rows)<100:
+                    break
+                page+=1
+            return {"ok":True,"maintenance":"audit_multicolor_missing_sizes","count":len(rows_out),"products":rows_out}
+        if slug == "__cxg_sizes_keep_color__":
+            source=await client.woo("GET",f"products/{product_id}")
+            attrs=source.get("attributes") or []
+            color_attr=next((a for a in attrs if int(a.get("id") or 0)==1 or str(a.get("name") or "").casefold() in ("color","couleur")),None)
+            if not color_attr or len(list(color_attr.get("options") or []))<1:
+                return {"ok":False,"maintenance":"sizes_keep_color","error":"No color attribute found."}
+            old_vars=[]
+            if source.get("type")=="variable":
+                old_vars=await client.woo("GET",f"products/{product_id}/variations",params={"per_page":100})
+            colors=list(color_attr.get("options") or [])
+            by_color={}
+            for v in old_vars:
+                col=None
+                for a in v.get("attributes") or []:
+                    if int(a.get("id") or 0)==1 or str(a.get("name") or "").casefold() in ("color","couleur"):
+                        col=str(a.get("option") or "")
+                        break
+                if col:
+                    by_color[col.casefold()]=v
+            plan=[]
+            for color in colors:
+                prior=by_color.get(str(color).casefold()) or {}
+                for size in ["S","M","L"]:
+                    payload={
+                        "status":"publish",
+                        "regular_price":str(prior.get("regular_price") or source.get("regular_price") or ""),
+                        "sale_price":str(prior.get("sale_price") or source.get("sale_price") or ""),
+                        "manage_stock":bool(prior.get("manage_stock",source.get("manage_stock",False))),
+                        "stock_status":prior.get("stock_status") or source.get("stock_status") or "instock",
+                        "attributes":[{"id":1,"option":color},{"id":3,"option":size}],
+                    }
+                    if prior.get("stock_quantity") is not None:
+                        payload["stock_quantity"]=prior.get("stock_quantity")
+                    img=prior.get("image") or {}
+                    if img.get("id"):
+                        payload["image"]={"id":img["id"]}
+                    plan.append(payload)
+            new_attrs=[]
+            for a in attrs:
+                aid=int(a.get("id") or 0)
+                nm=str(a.get("name") or "")
+                if aid==3 or nm.casefold() in ("size","taille"):
+                    continue
+                new_attrs.append({k:a[k] for k in ("id","name","position","visible","variation","options") if k in a})
+            new_attrs.append({"id":3,"name":"Size","position":len(new_attrs),"visible":True,"variation":True,"options":["S","M","L"]})
+            if dry_run:
+                return {"ok":True,"dry_run":True,"maintenance":"sizes_keep_color","product_id":product_id,"colors":colors,"variation_count":len(plan),"attributes":new_attrs}
+            policy.require_write()
+            for v in old_vars:
+                await client.woo("DELETE",f"products/{product_id}/variations/{v['id']}",params={"force":"true"})
+            parent=await client.woo("PUT",f"products/{product_id}",json={"type":"variable","attributes":new_attrs,"default_attributes":[]})
+            created=[]
+            for payload in plan:
+                cv=await client.woo("POST",f"products/{product_id}/variations",json=payload)
+                created.append({"id":cv.get("id"),"attributes":cv.get("attributes"),"regular_price":cv.get("regular_price"),"sale_price":cv.get("sale_price"),"stock_status":cv.get("stock_status")})
+            return {"ok":True,"maintenance":"sizes_keep_color","product":pick(parent),"created_variations":created}
+        if slug == "__cxg_audit_fr_lifestyle__":
+            page=1
+            rows_out=[]
+            while True:
+                rows=await client.woo("GET","products",params={"lang":"en","status":"any","per_page":100,"page":page})
+                if not rows:
+                    break
+                for p in rows:
+                    pid=int(p.get("id") or 0)
+                    tr=p.get("translations") or {}
+                    tid=tr.get("fr") if isinstance(tr,dict) else None
+                    if not tid:
+                        continue
+                    lifestyle=_meta_value(p,"lifestyle-gallery")
+                    frp=await client.woo("GET",f"products/{int(tid)}")
+                    fr_lifestyle=_meta_value(frp,"lifestyle-gallery")
+                    if str(lifestyle or "") != str(fr_lifestyle or ""):
+                        rows_out.append({"en_id":pid,"fr_id":int(tid),"name":p.get("name"),"en_value":lifestyle or "","fr_value":fr_lifestyle or ""})
+                if len(rows)<100:
+                    break
+                page+=1
+            return {"ok":True,"maintenance":"audit_fr_lifestyle","count":len(rows_out),"products":rows_out}
+        if slug == "__cxg_sync_fr_lifestyle_batch__":
+            if not name:
+                return {"ok":False,"maintenance":"sync_fr_lifestyle_batch","error":"Pass comma-separated English product IDs in name."}
+            ids3=[]
+            for part in str(name).split(","):
+                part=part.strip()
+                if part.isdigit():
+                    ids3.append(int(part))
+            if not ids3:
+                return {"ok":False,"maintenance":"sync_fr_lifestyle_batch","error":"No valid product IDs."}
+            if not dry_run:
+                policy.require_write()
+            results=[]
+            for pid in ids3:
+                try:
+                    p=await client.woo("GET",f"products/{pid}")
+                    tr=p.get("translations") or {}
+                    tid=tr.get("fr") if isinstance(tr,dict) else None
+                    if not tid:
+                        results.append({"en_id":pid,"ok":False,"error":"No linked French translation"})
+                        continue
+                    lifestyle=_meta_value(p,"lifestyle-gallery") or ""
+                    if dry_run:
+                        results.append({"en_id":pid,"fr_id":int(tid),"ok":True,"value":lifestyle})
+                    else:
+                        data=await client.woo("PUT",f"products/{int(tid)}",json={"meta_data":[{"key":"lifestyle-gallery","value":lifestyle}]})
+                        results.append({"en_id":pid,"fr_id":int(tid),"ok":True,"value":lifestyle,"date_modified":data.get("date_modified")})
+                except Exception as be:
+                    results.append({"en_id":pid,"ok":False,"error":str(be)})
+            return {"ok":all(x.get("ok") for x in results),"dry_run":dry_run,"maintenance":"sync_fr_lifestyle_batch","results":results}
         if slug == "__cxg_sync_all_fr_lifestyle__":
             page=1
             synced=[]
