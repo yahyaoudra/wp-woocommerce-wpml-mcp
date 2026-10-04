@@ -621,6 +621,168 @@ async def wpml_update_product_translation(
     except Exception as e:
         return fail(action, e, source_product_id, dry_run)
 
+
+@mcp.tool(title="Preview or trash product", annotations=HIGH)
+async def product_trash(
+    product_id: Annotated[int, Field(gt=0)],
+    include_translations: bool = True,
+    dry_run: bool = True,
+) -> dict[str, Any]:
+    action = "product_trash"
+    try:
+        product = await client.woo("GET", f"products/{product_id}")
+        ids = [int(product_id)]
+        if include_translations:
+            tr = product.get("translations") or {}
+            if isinstance(tr, dict):
+                for v in tr.values():
+                    try:
+                        iv = int(v)
+                    except Exception:
+                        continue
+                    if iv not in ids:
+                        ids.append(iv)
+        if dry_run:
+            return {
+                "ok": True,
+                "dry_run": True,
+                "products": ids,
+                "names": [product.get("name")],
+            }
+        policy.require_write()
+        results = []
+        for pid in ids:
+            try:
+                data = await client.woo("DELETE", f"products/{pid}", params={"force": "false"})
+                results.append({"id": pid, "ok": True, "status": data.get("status")})
+            except Exception as de:
+                results.append({"id": pid, "ok": False, "error": str(de)})
+        audit.record(action, target=product_id, dry_run=False, payload={"include_translations": include_translations}, result=results)
+        return {"ok": all(r["ok"] for r in results), "dry_run": False, "results": results}
+    except Exception as e:
+        return fail(action, e, product_id, dry_run)
+
+
+@mcp.tool(title="Preview or normalize product to size variations", annotations=HIGH)
+async def product_set_size_variations(
+    product_id: Annotated[int, Field(gt=0)],
+    sizes: list[str] = ["S", "M", "L"],
+    remove_color_attribute: bool = True,
+    dry_run: bool = True,
+) -> dict[str, Any]:
+    action = "product_set_size_variations"
+    try:
+        source = await client.woo("GET", f"products/{product_id}")
+        if not sizes:
+            raise ValueError("Provide at least one size.")
+        current_variations = []
+        if source.get("type") == "variable":
+            current_variations = await client.woo(
+                "GET", f"products/{product_id}/variations", params={"per_page": 100}
+            )
+
+        def get_size(v: dict[str, Any]) -> str | None:
+            for a in v.get("attributes") or []:
+                if int(a.get("id") or 0) == 3 or str(a.get("name") or "").casefold() == "size":
+                    return str(a.get("option") or "")
+            return None
+
+        by_size: dict[str, dict[str, Any]] = {}
+        for v in current_variations:
+            sz = get_size(v)
+            if sz:
+                by_size[sz.upper()] = v
+
+        attrs = []
+        for a in source.get("attributes") or []:
+            aid = int(a.get("id") or 0)
+            name = str(a.get("name") or "")
+            if remove_color_attribute and (aid == 1 or name.casefold() in ("color", "couleur")):
+                continue
+            if aid == 3 or name.casefold() == "size":
+                continue
+            attrs.append({
+                k: a[k] for k in ("id","name","position","visible","variation","options") if k in a
+            })
+        attrs.append({
+            "id": 3,
+            "name": "Size",
+            "position": len(attrs),
+            "visible": True,
+            "variation": True,
+            "options": sizes,
+        })
+
+        regular = str(source.get("regular_price") or "")
+        sale = str(source.get("sale_price") or "")
+        if not regular and current_variations:
+            regular = str(current_variations[0].get("regular_price") or "")
+        if not sale and current_variations:
+            sale = str(current_variations[0].get("sale_price") or "")
+
+        plan = []
+        for size in sizes:
+            prior = by_size.get(size.upper())
+            payload: dict[str, Any] = {
+                "status": "publish",
+                "regular_price": str((prior or {}).get("regular_price") or regular),
+                "sale_price": str((prior or {}).get("sale_price") or sale),
+                "manage_stock": bool((prior or {}).get("manage_stock", source.get("manage_stock", False))),
+                "stock_status": (prior or {}).get("stock_status") or source.get("stock_status") or "instock",
+                "attributes": [{"id": 3, "option": size}],
+            }
+            sq = (prior or {}).get("stock_quantity")
+            if sq is None:
+                sq = source.get("stock_quantity")
+            if sq is not None:
+                payload["stock_quantity"] = sq
+            img = (prior or {}).get("image") or {}
+            if img.get("id"):
+                payload["image"] = {"id": img["id"]}
+            plan.append({"size": size, "payload": payload})
+
+        preview = {
+            "product_id": product_id,
+            "from_type": source.get("type"),
+            "old_variation_count": len(current_variations),
+            "new_variation_count": len(plan),
+            "attributes": attrs,
+            "plan": plan,
+        }
+        if dry_run:
+            audit.record(action, target=product_id, dry_run=True, payload=preview)
+            return {"ok": True, "dry_run": True, **preview}
+
+        policy.require_write()
+        for v in current_variations:
+            await client.woo("DELETE", f"products/{product_id}/variations/{v['id']}", params={"force": "true"})
+        parent = await client.woo("PUT", f"products/{product_id}", json={
+            "type": "variable",
+            "attributes": attrs,
+            "default_attributes": [],
+        })
+        created = []
+        for item in plan:
+            cv = await client.woo("POST", f"products/{product_id}/variations", json=item["payload"])
+            created.append({
+                "id": cv.get("id"),
+                "size": item["size"],
+                "regular_price": cv.get("regular_price"),
+                "sale_price": cv.get("sale_price"),
+                "stock_status": cv.get("stock_status"),
+                "stock_quantity": cv.get("stock_quantity"),
+            })
+        audit.record(action, target=product_id, dry_run=False, payload=preview, result={"created": created})
+        return {
+            "ok": True,
+            "dry_run": False,
+            "product": pick(parent),
+            "created_variations": created,
+        }
+    except Exception as e:
+        return fail(action, e, product_id, dry_run)
+
+
 @mcp.tool(title="Preview or publish product", annotations=HIGH)
 async def product_publish(product_id: Annotated[int, Field(gt=0)], dry_run: bool = True) -> dict[str, Any]:
     action = "product_publish"
