@@ -2,3 +2,4 @@ mcp>=2.0,<3
 httpx>=0.28,<1
 pydantic>=2.10,<3
 pydantic-settings>=2.8,<3
+Pillow>=11,<12
