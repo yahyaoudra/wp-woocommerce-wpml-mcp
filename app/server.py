@@ -484,7 +484,84 @@ async def wpml_create_product_translation(
         if translated_category_ids is not None:
             payload["categories"] = [{"id":i} for i in translated_category_ids]
         if source.get("type") == "variable":
-            raise ValueError("Use wpml_create_variable_product_translation for variable products.")
+            source_lang = str(source.get("lang") or "en")
+            payload["attributes"] = await _translated_product_attributes(
+                list(source.get("attributes") or []), source_lang, target_lang
+            )
+            if source.get("default_attributes"):
+                payload["default_attributes"] = await _translated_variation_attributes(
+                    list(source.get("default_attributes") or []), source_lang, target_lang
+                )
+            source_variations = await client.woo(
+                "GET", f"products/{source_product_id}/variations",
+                params={"lang": source_lang, "per_page": 100},
+            )
+            variation_previews: list[dict[str, Any]] = []
+            for v in source_variations:
+                vp: dict[str, Any] = {
+                    "lang": target_lang,
+                    "translation_of": v.get("id"),
+                    "status": v.get("status") or "publish",
+                    "regular_price": v.get("regular_price") or "",
+                    "sale_price": v.get("sale_price") or "",
+                    "virtual": bool(v.get("virtual", False)),
+                    "downloadable": bool(v.get("downloadable", False)),
+                    "manage_stock": bool(v.get("manage_stock", False)),
+                    "stock_status": v.get("stock_status") or "instock",
+                    "backorders": v.get("backorders") or "no",
+                    "menu_order": int(v.get("menu_order") or 0),
+                    "attributes": await _translated_variation_attributes(
+                        list(v.get("attributes") or []), source_lang, target_lang
+                    ),
+                }
+                if v.get("stock_quantity") is not None:
+                    vp["stock_quantity"] = v.get("stock_quantity")
+                image = v.get("image") or {}
+                if image.get("id"):
+                    vp["image"] = {"id": image["id"]}
+                variation_previews.append({"source_variation_id": v.get("id"), "payload": vp})
+            if dry_run:
+                audit.record(action, target=source_product_id, dry_run=True, payload={
+                    "product": payload, "variation_count": len(variation_previews)
+                })
+                return {
+                    "ok":True,"dry_run":True,"payload":payload,
+                    "variations":variation_previews,
+                }
+            policy.require_write()
+            data = await client.woo("POST", "products", json=payload)
+            translated_id = int(data["id"])
+            created_variations, variation_errors = [], []
+            for item in variation_previews:
+                try:
+                    created = await client.woo(
+                        "POST", f"products/{translated_id}/variations", json=item["payload"]
+                    )
+                    created_variations.append({
+                        "source_variation_id": item["source_variation_id"],
+                        "translated_variation_id": created.get("id"),
+                        "price": created.get("price"),
+                        "stock_status": created.get("stock_status"),
+                        "stock_quantity": created.get("stock_quantity"),
+                    })
+                except Exception as ve:
+                    variation_errors.append({
+                        "source_variation_id": item["source_variation_id"],
+                        "error": str(ve),
+                    })
+            audit.record(action, target=source_product_id, dry_run=False, payload={
+                "product": payload, "variation_count": len(variation_previews)
+            }, result={
+                "id": translated_id, "variation_count": len(created_variations),
+                "variation_errors": variation_errors,
+            })
+            return {
+                "ok": len(variation_errors) == 0,
+                "dry_run":False,
+                "product":pick(data),
+                "created_variations":created_variations,
+                "variation_errors":variation_errors,
+            }
         if dry_run:
             audit.record(action, target=source_product_id, dry_run=True, payload=payload)
             return {"ok":True,"dry_run":True,"payload":payload}
