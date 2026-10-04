@@ -568,6 +568,86 @@ async def product_update_content(
                     break
                 page+=1
             return {"ok":not any("error" in x for x in synced),"dry_run":dry_run,"maintenance":"sync_all_fr_lifestyle","count":len(synced),"synced":synced,"skipped":skipped}
+        if slug == "__cxg_sync_fr_full_product__":
+            source=await client.woo("GET",f"products/{product_id}")
+            tr=source.get("translations") or {}
+            tid=tr.get("fr") if isinstance(tr,dict) else None
+            if not tid:
+                return {"ok":False,"maintenance":"sync_fr_full_product","error":"No linked French translation."}
+            tid=int(tid)
+            source_vars=[]
+            if source.get("type")=="variable":
+                source_vars=await client.woo("GET",f"products/{product_id}/variations",params={"lang":"en","per_page":100})
+            lifestyle=_meta_value(source,"lifestyle-gallery") or ""
+            parent_payload={
+                "images":[{"id":i["id"]} for i in (source.get("images") or []) if i.get("id")],
+                "meta_data":[{"key":"lifestyle-gallery","value":lifestyle}],
+                "manage_stock":bool(source.get("manage_stock",False)),
+                "stock_status":source.get("stock_status") or "instock",
+            }
+            if source.get("stock_quantity") is not None:
+                parent_payload["stock_quantity"]=source.get("stock_quantity")
+            if source.get("type")=="simple":
+                parent_payload["regular_price"]=str(source.get("regular_price") or "")
+                parent_payload["sale_price"]=str(source.get("sale_price") or "")
+            if dry_run:
+                return {
+                    "ok":True,"dry_run":True,"maintenance":"sync_fr_full_product",
+                    "source_id":product_id,"fr_id":tid,
+                    "image_ids":[x.get("id") for x in (source.get("images") or [])],
+                    "lifestyle":lifestyle,
+                    "variation_count":len(source_vars),
+                    "source_price":source.get("price"),
+                    "source_regular_price":source.get("regular_price"),
+                    "source_sale_price":source.get("sale_price"),
+                }
+            policy.require_write()
+            fr=await client.woo("GET",f"products/{tid}")
+            if source.get("type")=="variable":
+                source_lang=str(source.get("lang") or "en")
+                target_lang="fr"
+                attrs=await _translated_product_attributes(list(source.get("attributes") or []),source_lang,target_lang)
+                parent_payload["type"]="variable"
+                parent_payload["attributes"]=attrs
+                parent_payload["default_attributes"]=[]
+                old_fr_vars=await client.woo("GET",f"products/{tid}/variations",params={"lang":"fr","per_page":100})
+                for v in old_fr_vars:
+                    await client.woo("DELETE",f"products/{tid}/variations/{v['id']}",params={"force":"true"})
+                updated=await client.woo("PUT",f"products/{tid}",json=parent_payload)
+                created=[]
+                for sv in source_vars:
+                    vp={
+                        "lang":"fr",
+                        "translation_of":sv.get("id"),
+                        "status":sv.get("status") or "publish",
+                        "regular_price":str(sv.get("regular_price") or ""),
+                        "sale_price":str(sv.get("sale_price") or ""),
+                        "virtual":bool(sv.get("virtual",False)),
+                        "downloadable":bool(sv.get("downloadable",False)),
+                        "manage_stock":bool(sv.get("manage_stock",False)),
+                        "stock_status":sv.get("stock_status") or "instock",
+                        "backorders":sv.get("backorders") or "no",
+                        "menu_order":int(sv.get("menu_order") or 0),
+                        "attributes":await _translated_variation_attributes(list(sv.get("attributes") or []),source_lang,target_lang),
+                    }
+                    if sv.get("stock_quantity") is not None:
+                        vp["stock_quantity"]=sv.get("stock_quantity")
+                    img=sv.get("image") or {}
+                    if img.get("id"):
+                        vp["image"]={"id":img["id"]}
+                    cv=await client.woo("POST",f"products/{tid}/variations",json=vp)
+                    created.append({
+                        "source_variation_id":sv.get("id"),
+                        "fr_variation_id":cv.get("id"),
+                        "regular_price":cv.get("regular_price"),
+                        "sale_price":cv.get("sale_price"),
+                        "stock_status":cv.get("stock_status"),
+                        "attributes":cv.get("attributes"),
+                    })
+                return {"ok":True,"maintenance":"sync_fr_full_product","product":pick(updated),"created_variations":created}
+            else:
+                updated=await client.woo("PUT",f"products/{tid}",json=parent_payload)
+                return {"ok":True,"maintenance":"sync_fr_full_product","product":pick(updated)}
         if slug == "__cxg_sync_fr_lifestyle__":
             source = await client.woo("GET", f"products/{product_id}")
             lifestyle = _meta_value(source, "lifestyle-gallery")
