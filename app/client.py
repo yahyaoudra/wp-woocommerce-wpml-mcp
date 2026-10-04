@@ -47,6 +47,19 @@ class WordPressClient:
             r = await client.request(method, url, params=params, json=json, auth=auth)
         return await self._decode(r)
 
+    async def wp_media(self, filename: str, mime_type: str, content: bytes) -> Any:
+        if not self.s.wp_username or not self.s.wp_app_password:
+            raise RemoteAPIError("WP_USERNAME and WP_APP_PASSWORD are required for media upload.")
+        url = f"{self.s.base_url}/wp-json/wp/v2/media"
+        auth = httpx.BasicAuth(self.s.wp_username, self.s.wp_app_password)
+        headers = {
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "Content-Type": mime_type,
+        }
+        async with httpx.AsyncClient(timeout=self.timeout, verify=self.s.verify_tls, follow_redirects=True) as client:
+            r = await client.post(url, content=content, headers=headers, auth=auth)
+        return await self._decode(r)
+
     async def root(self) -> Any:
         url = f"{self.s.base_url}/wp-json/"
         async with httpx.AsyncClient(timeout=self.timeout, verify=self.s.verify_tls, follow_redirects=True) as client:
