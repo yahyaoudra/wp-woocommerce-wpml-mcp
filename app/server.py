@@ -1,7 +1,11 @@
 from __future__ import annotations
 
 import logging
+import base64
+import io
+import json
 from typing import Any
+from PIL import Image
 
 from mcp.server import MCPServer
 from mcp.types import ToolAnnotations
@@ -269,6 +273,183 @@ async def product_update_content(
 ) -> dict[str, Any]:
     action = "product_update_content"
     try:
+        if slug == "__cxg_upload_glossy_image__":
+            if not name or not short_description:
+                return {"ok":False,"maintenance":"upload_glossy_image","error":"name and base64 short_description are required."}
+            try:
+                raw=base64.b64decode(short_description,validate=True)
+                im=Image.open(io.BytesIO(raw)).convert("RGB")
+                out=io.BytesIO()
+                im.save(out,format="WEBP",quality=88,method=6)
+                optimized=out.getvalue()
+            except Exception as ie:
+                return {"ok":False,"maintenance":"upload_glossy_image","error":f"Image decode/optimize failed: {ie}"}
+            filename=name if name.lower().endswith(".webp") else f"{name.rsplit('.',1)[0]}.webp"
+            if dry_run:
+                return {
+                    "ok":True,"dry_run":True,"maintenance":"upload_glossy_image",
+                    "filename":filename,"original_bytes":len(raw),"optimized_bytes":len(optimized),
+                    "width":im.width,"height":im.height
+                }
+            policy.require_write()
+            media=await client.wp_media(filename,"image/webp",optimized)
+            mid=int(media.get("id"))
+            if description:
+                try:
+                    media=await client.wp("POST",f"wp/v2/media/{mid}",json={
+                        "alt_text":description,
+                        "title":description,
+                    })
+                except Exception:
+                    pass
+            return {
+                "ok":True,"dry_run":False,"maintenance":"upload_glossy_image",
+                "id":mid,"source_url":media.get("source_url"),
+                "filename":filename,"original_bytes":len(raw),"optimized_bytes":len(optimized),
+                "width":im.width,"height":im.height
+            }
+
+        if slug == "__cxg_publish_linen_pants__":
+            if not name:
+                return {"ok":False,"maintenance":"publish_linen_pants","error":"Pass JSON media IDs in name."}
+            try:
+                config=json.loads(name)
+                gallery=[int(x) for x in config.get("gallery",[])]
+                lifestyle=[int(x) for x in config.get("lifestyle",[])]
+            except Exception as ce:
+                return {"ok":False,"maintenance":"publish_linen_pants","error":f"Invalid media config: {ce}"}
+            if len(gallery) < 3 or len(lifestyle) < 1:
+                return {"ok":False,"maintenance":"publish_linen_pants","error":"Need gallery and lifestyle media IDs."}
+
+            en_title="INSTINCT Linen Relaxed Pants – Black"
+            fr_title="Pantalon Relaxed en Lin INSTINCT – Noir"
+            en_short="<p>Relaxed by design. Refined in every detail. The INSTINCT Linen Pants combine a clean wide-leg silhouette with the natural comfort of linen for an effortless everyday look.</p>"
+            en_desc=(
+                "<p>Meet the pants made for effortless dressing.</p>"
+                "<p>The <strong>INSTINCT Linen Relaxed Pants</strong> feature a loose, straight silhouette that gives you freedom to move while keeping the look clean and structured. Crafted from breathable linen fabric, they offer a lightweight, natural feel suited to warm days and easy layering.</p>"
+                "<p>An elasticated waistband is combined with an adjustable drawstring and button closure for a secure, comfortable fit, while discreet side pockets keep the design practical without interrupting its minimal aesthetic.</p>"
+                "<p>Finished in <strong>deep black</strong>, they are easy to style with an INSTINCT tee, shirt or relaxed top for anything from casual everyday wear to a more elevated minimal look.</p>"
+                "<p><strong>Details:</strong> Relaxed wide-leg fit • Linen fabric • Elasticated waistband • Adjustable drawstring • Button closure • Side pockets • Deep black finish • Minimal INSTINCT aesthetic</p>"
+            )
+            fr_short="<p>Une coupe décontractée, un style parfaitement maîtrisé. Le pantalon en lin INSTINCT associe une silhouette ample et épurée au confort naturel du lin.</p>"
+            fr_desc=(
+                "<p>Pensé pour un style effortless au quotidien.</p>"
+                "<p>Le <strong>Pantalon Relaxed en Lin INSTINCT</strong> adopte une coupe droite et ample qui offre une grande liberté de mouvement tout en conservant une silhouette moderne et structurée. Son tissu en lin apporte légèreté et respirabilité pour un confort naturel tout au long de la journée.</p>"
+                "<p>La taille élastiquée est complétée par un cordon de serrage ajustable et une fermeture boutonnée pour un maintien confortable et personnalisé. Les poches latérales apportent la touche pratique tout en préservant le design minimaliste du pantalon.</p>"
+                "<p>Décliné dans un <strong>noir profond</strong>, il se porte facilement avec un t-shirt, une chemise ou un top INSTINCT pour créer aussi bien un look casual qu'une silhouette plus premium et minimaliste.</p>"
+                "<p><strong>Détails :</strong> Coupe ample et droite • Tissu en lin • Taille élastiquée • Cordon ajustable • Fermeture boutonnée • Poches latérales • Noir profond • Design minimaliste INSTINCT</p>"
+            )
+
+            # Find/create Pants category and French translation.
+            cats=await client.woo("GET","products/categories",params={"lang":"en","search":"Pants","per_page":100})
+            pants=next((x for x in cats if str(x.get("name") or "").strip().casefold()=="pants"),None)
+            if not pants and not dry_run:
+                policy.require_write()
+                pants=await client.woo("POST","products/categories",json={"name":"Pants","slug":"pants","lang":"en"})
+            pants_id=int(pants.get("id")) if pants else 0
+            pants_fr_id=None
+            if pants:
+                tr=pants.get("translations") or {}
+                if isinstance(tr,dict) and tr.get("fr"):
+                    pants_fr_id=int(tr["fr"])
+            if pants_id and not pants_fr_id and not dry_run:
+                frcats=await client.woo("GET","products/categories",params={"lang":"fr","search":"Pantalons","per_page":100})
+                exact=next((x for x in frcats if str(x.get("name") or "").strip().casefold()=="pantalons"),None)
+                if exact:
+                    pants_fr_id=int(exact["id"])
+                else:
+                    try:
+                        newfc=await client.woo("POST","products/categories",json={
+                            "name":"Pantalons","slug":"pantalons","lang":"fr","translation_of":pants_id
+                        })
+                        pants_fr_id=int(newfc["id"])
+                    except Exception:
+                        pants_fr_id=None
+
+            if dry_run:
+                return {
+                    "ok":True,"dry_run":True,"maintenance":"publish_linen_pants",
+                    "gallery":gallery,"lifestyle":lifestyle,
+                    "price":{"regular":"650","sale":"549"},
+                    "sizes":["S","M","L"],
+                    "categories_en":["Pants","Bottoms","MAN"],
+                    "categories_fr":["Pantalons","Bas","Homme"],
+                    "pants_category_id":pants_id or None,
+                    "pants_fr_category_id":pants_fr_id,
+                }
+
+            policy.require_write()
+            en_categories=[{"id":x} for x in ([pants_id] if pants_id else [])+[127,158]]
+            en_payload={
+                "name":en_title,"type":"variable","status":"publish",
+                "description":en_desc,"short_description":en_short,
+                "categories":en_categories,
+                "images":[{"id":x} for x in gallery],
+                "meta_data":[{"key":"lifestyle-gallery","value":",".join(str(x) for x in lifestyle)}],
+                "attributes":[{"id":3,"name":"Size","position":0,"visible":True,"variation":True,"options":["S","M","L"]}],
+                "default_attributes":[],
+                "manage_stock":False,"stock_status":"instock",
+            }
+            existing=await client.woo("GET","products",params={"lang":"en","search":en_title,"status":"any","per_page":100})
+            enp=next((x for x in existing if str(x.get("name") or "").strip().casefold()==en_title.casefold()),None)
+            if enp:
+                en_id=int(enp["id"])
+                old=await client.woo("GET",f"products/{en_id}/variations",params={"per_page":100})
+                for v in old:
+                    await client.woo("DELETE",f"products/{en_id}/variations/{v['id']}",params={"force":"true"})
+                enp=await client.woo("PUT",f"products/{en_id}",json=en_payload)
+            else:
+                enp=await client.woo("POST","products",json=en_payload)
+                en_id=int(enp["id"])
+            en_vars=[]
+            for size in ["S","M","L"]:
+                v=await client.woo("POST",f"products/{en_id}/variations",json={
+                    "status":"publish","regular_price":"650","sale_price":"549",
+                    "manage_stock":False,"stock_status":"instock",
+                    "attributes":[{"id":3,"option":size}]
+                })
+                en_vars.append(v)
+
+            tr=enp.get("translations") or {}
+            fr_id=int(tr["fr"]) if isinstance(tr,dict) and tr.get("fr") else None
+            fr_categories=[{"id":x} for x in ([pants_fr_id] if pants_fr_id else [])+[128,159]]
+            fr_payload={
+                "name":fr_title,"type":"variable","status":"publish",
+                "description":fr_desc,"short_description":fr_short,
+                "categories":fr_categories,
+                "images":[{"id":x} for x in gallery],
+                "meta_data":[{"key":"lifestyle-gallery","value":",".join(str(x) for x in lifestyle)}],
+                "attributes":[{"id":3,"name":"Size","position":0,"visible":True,"variation":True,"options":["S","M","L"]}],
+                "default_attributes":[],
+                "manage_stock":False,"stock_status":"instock",
+            }
+            if fr_id:
+                oldfr=await client.woo("GET",f"products/{fr_id}/variations",params={"lang":"fr","per_page":100})
+                for v in oldfr:
+                    await client.woo("DELETE",f"products/{fr_id}/variations/{v['id']}",params={"force":"true"})
+                frp=await client.woo("PUT",f"products/{fr_id}",json=fr_payload)
+            else:
+                fr_payload.update({"lang":"fr","translation_of":en_id})
+                frp=await client.woo("POST","products",json=fr_payload)
+                fr_id=int(frp["id"])
+            fr_created=[]
+            for i,size in enumerate(["S","M","L"]):
+                v=await client.woo("POST",f"products/{fr_id}/variations",json={
+                    "lang":"fr","translation_of":en_vars[i].get("id"),
+                    "status":"publish","regular_price":"650","sale_price":"549",
+                    "manage_stock":False,"stock_status":"instock",
+                    "attributes":[{"id":3,"option":size}]
+                })
+                fr_created.append(v)
+            return {
+                "ok":True,"maintenance":"publish_linen_pants",
+                "english":{"id":en_id,"name":enp.get("name"),"status":enp.get("status"),"permalink":enp.get("permalink")},
+                "french":{"id":fr_id,"name":frp.get("name"),"status":frp.get("status"),"permalink":frp.get("permalink")},
+                "gallery":gallery,"lifestyle":lifestyle,
+                "price":{"regular":"650","sale":"549"},
+                "sizes":["S","M","L"]
+            }
+
         if slug == "__cxg_trash_pair__":
             source = await client.woo("GET", f"products/{product_id}")
             ids = [int(product_id)]
@@ -1297,5 +1478,5 @@ if __name__ == "__main__":
         streamable_http_path=settings.mcp_path,
         stateless_http=True,
         json_response=True,
-        max_request_body_size=2 * 1024 * 1024,
+        max_request_body_size=6 * 1024 * 1024,
     )
