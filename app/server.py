@@ -16,6 +16,7 @@ from .audit import AuditLogger
 from .client import WordPressClient
 from .config import get_settings
 from .policy import Policy
+from .product_tools import register_product_tools
 
 settings = get_settings()
 logging.basicConfig(level=getattr(logging, settings.log_level.upper(), logging.INFO))
@@ -1523,6 +1524,8 @@ async def product_publish(product_id: Annotated[int, Field(gt=0)], dry_run: bool
         return {"ok":True,"dry_run":False,"product":pick(data)}
     except Exception as e:
         return fail(action, e, product_id, dry_run)
+
+register_product_tools(mcp, client, policy, audit, settings)
 
 if __name__ == "__main__":
     log.info("Starting MCP on %s:%s%s", settings.mcp_host, settings.mcp_port, settings.mcp_path)
