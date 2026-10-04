@@ -174,7 +174,7 @@ def _meta_value(product: dict[str, Any], key: str) -> Any:
             return item.get("value")
     return None
 
-async def _normalize_product_sizes(product_id: int, sizes: list[str]) -> dict[str, Any]:
+async def _normalize_product_sizes(product_id: int, sizes: list[str], fallback_regular: str = "", fallback_sale: str = "") -> dict[str, Any]:
     source = await client.woo("GET", f"products/{product_id}")
     current_variations = []
     if source.get("type") == "variable":
@@ -214,6 +214,10 @@ async def _normalize_product_sizes(product_id: int, sizes: list[str]) -> dict[st
         regular = str(current_variations[0].get("regular_price") or "")
     if current_variations and not sale:
         sale = str(current_variations[0].get("sale_price") or "")
+    if not regular:
+        regular = str(fallback_regular or "")
+    if not sale:
+        sale = str(fallback_sale or "")
 
     plans=[]
     for size in sizes:
@@ -319,9 +323,20 @@ async def product_update_content(
                     })
                 return {"ok":True,"dry_run":True,"maintenance":"normalize_sizes","products":preview,"sizes":["S","M","L"]}
             policy.require_write()
+            master_regular = str(source.get("regular_price") or "")
+            master_sale = str(source.get("sale_price") or "")
+            if source.get("type") == "variable":
+                master_vars = await client.woo("GET", f"products/{product_id}/variations", params={"per_page":100})
+                if master_vars and not master_regular:
+                    master_regular = str(master_vars[0].get("regular_price") or "")
+                if master_vars and not master_sale:
+                    master_sale = str(master_vars[0].get("sale_price") or "")
+            ordered_ids = [pid for pid in ids if pid != int(product_id)] + [int(product_id)]
             results=[]
-            for pid in ids:
-                results.append({"id":pid, **(await _normalize_product_sizes(pid, ["S","M","L"]))})
+            for pid in ordered_ids:
+                results.append({"id":pid, **(await _normalize_product_sizes(
+                    pid, ["S","M","L"], master_regular, master_sale
+                ))})
             return {"ok":True,"maintenance":"normalize_sizes","results":results}
         if slug == "__cxg_sync_fr_lifestyle__":
             source = await client.woo("GET", f"products/{product_id}")
