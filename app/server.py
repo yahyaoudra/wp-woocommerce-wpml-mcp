@@ -239,6 +239,212 @@ async def product_update_stock(
     except Exception as e:
         return fail(action, e, product_id, dry_run)
 
+
+async def _translated_attribute_option(attribute_id: int, option: str, source_lang: str, target_lang: str) -> str:
+    """Map a global WooCommerce attribute term to its translated display name."""
+    try:
+        source_terms = await client.woo(
+            "GET", f"products/attributes/{attribute_id}/terms",
+            params={"lang": source_lang, "per_page": 100}
+        )
+        target_terms = await client.woo(
+            "GET", f"products/attributes/{attribute_id}/terms",
+            params={"lang": target_lang, "per_page": 100}
+        )
+        source_term = next(
+            (
+                t for t in source_terms
+                if str(t.get("name", "")).casefold() == option.casefold()
+                or str(t.get("slug", "")).casefold() == option.casefold()
+            ),
+            None,
+        )
+        if source_term:
+            translations = source_term.get("translations") or {}
+            target_id = translations.get(target_lang) if isinstance(translations, dict) else None
+            if target_id:
+                target = next((t for t in target_terms if str(t.get("id")) == str(target_id)), None)
+                if target and target.get("name"):
+                    return str(target["name"])
+        direct = next(
+            (
+                t for t in target_terms
+                if str(t.get("name", "")).casefold() == option.casefold()
+                or str(t.get("slug", "")).casefold() == option.casefold()
+            ),
+            None,
+        )
+        if direct and direct.get("name"):
+            return str(direct["name"])
+    except Exception:
+        pass
+    return option
+
+
+async def _translated_product_attributes(attributes: list[dict[str, Any]], source_lang: str, target_lang: str) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for attr in attributes or []:
+        row = {
+            k: attr[k] for k in ("id", "name", "position", "visible", "variation")
+            if k in attr
+        }
+        options = list(attr.get("options") or [])
+        attribute_id = int(attr.get("id") or 0)
+        if attribute_id > 0:
+            row["options"] = [
+                await _translated_attribute_option(attribute_id, str(opt), source_lang, target_lang)
+                for opt in options
+            ]
+        else:
+            row["options"] = options
+        out.append(row)
+    return out
+
+
+async def _translated_variation_attributes(attributes: list[dict[str, Any]], source_lang: str, target_lang: str) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for attr in attributes or []:
+        row = {k: attr[k] for k in ("id", "name") if k in attr}
+        option = str(attr.get("option") or "")
+        attribute_id = int(attr.get("id") or 0)
+        if attribute_id > 0 and option:
+            option = await _translated_attribute_option(attribute_id, option, source_lang, target_lang)
+        row["option"] = option
+        out.append(row)
+    return out
+
+
+@mcp.tool(title="Preview or create full WPML variable product translation", annotations=WRITE)
+async def wpml_create_variable_product_translation(
+    source_product_id: Annotated[int, Field(gt=0)],
+    target_lang: str,
+    name: str,
+    description: str = "",
+    short_description: str = "",
+    slug: str | None = None,
+    status: str | None = None,
+    dry_run: bool = True,
+) -> dict[str, Any]:
+    action = "wpml_create_variable_product_translation"
+    try:
+        source = await client.woo("GET", f"products/{source_product_id}")
+        if source.get("type") != "variable":
+            raise ValueError("Source product is not variable.")
+        existing = source.get("translations") or {}
+        if isinstance(existing, dict) and existing.get(target_lang):
+            raise ValueError(f"Translation already exists: {existing[target_lang]}")
+        source_lang = str(source.get("lang") or "en")
+        translated_attributes = await _translated_product_attributes(
+            list(source.get("attributes") or []), source_lang, target_lang
+        )
+        payload: dict[str, Any] = {
+            "name": name,
+            "description": description,
+            "short_description": short_description,
+            "type": "variable",
+            "status": status or source.get("status") or "draft",
+            "lang": target_lang,
+            "translation_of": source_product_id,
+            "attributes": translated_attributes,
+        }
+        if slug:
+            payload["slug"] = slug
+        if source.get("default_attributes"):
+            payload["default_attributes"] = await _translated_variation_attributes(
+                list(source.get("default_attributes") or []), source_lang, target_lang
+            )
+        if settings.translation_copy_images and source.get("images"):
+            payload["images"] = [{"id": i["id"]} for i in source["images"] if i.get("id")]
+        if settings.translation_copy_physical_fields:
+            for k in ("virtual", "downloadable", "tax_status", "tax_class", "weight", "dimensions", "shipping_class"):
+                if source.get(k) not in (None, ""):
+                    payload[k] = source[k]
+
+        source_variations = await client.woo(
+            "GET", f"products/{source_product_id}/variations",
+            params={"lang": source_lang, "per_page": 100},
+        )
+        variation_previews: list[dict[str, Any]] = []
+        for v in source_variations:
+            vp: dict[str, Any] = {
+                "lang": target_lang,
+                "translation_of": v.get("id"),
+                "status": v.get("status") or "publish",
+                "regular_price": v.get("regular_price") or "",
+                "sale_price": v.get("sale_price") or "",
+                "virtual": bool(v.get("virtual", False)),
+                "downloadable": bool(v.get("downloadable", False)),
+                "manage_stock": bool(v.get("manage_stock", False)),
+                "stock_status": v.get("stock_status") or "instock",
+                "backorders": v.get("backorders") or "no",
+                "menu_order": int(v.get("menu_order") or 0),
+                "attributes": await _translated_variation_attributes(
+                    list(v.get("attributes") or []), source_lang, target_lang
+                ),
+            }
+            if v.get("stock_quantity") is not None:
+                vp["stock_quantity"] = v.get("stock_quantity")
+            for k in ("weight", "dimensions", "shipping_class"):
+                if v.get(k) not in (None, ""):
+                    vp[k] = v[k]
+            image = v.get("image") or {}
+            if image.get("id"):
+                vp["image"] = {"id": image["id"]}
+            variation_previews.append({"source_variation_id": v.get("id"), "payload": vp})
+
+        if dry_run:
+            audit.record(action, target=source_product_id, dry_run=True, payload={
+                "product": payload, "variation_count": len(variation_previews)
+            })
+            return {
+                "ok": True,
+                "dry_run": True,
+                "source_product_id": source_product_id,
+                "product_payload": payload,
+                "variations": variation_previews,
+            }
+
+        policy.require_write()
+        translated = await client.woo("POST", "products", json=payload)
+        translated_id = int(translated["id"])
+        created_variations: list[dict[str, Any]] = []
+        errors: list[dict[str, Any]] = []
+        for item in variation_previews:
+            try:
+                created = await client.woo(
+                    "POST", f"products/{translated_id}/variations", json=item["payload"]
+                )
+                created_variations.append({
+                    "source_variation_id": item["source_variation_id"],
+                    "translated_variation_id": created.get("id"),
+                    "price": created.get("price"),
+                    "stock_status": created.get("stock_status"),
+                    "stock_quantity": created.get("stock_quantity"),
+                })
+            except Exception as ve:
+                errors.append({
+                    "source_variation_id": item["source_variation_id"],
+                    "error": str(ve),
+                })
+        result = {
+            "id": translated_id,
+            "variation_count": len(created_variations),
+            "variation_errors": errors,
+        }
+        audit.record(action, target=source_product_id, dry_run=False, payload={
+            "product": payload, "variation_count": len(variation_previews)
+        }, result=result)
+        return {
+            "ok": len(errors) == 0,
+            "dry_run": False,
+            "product": pick(translated),
+            "created_variations": created_variations,
+            "variation_errors": errors,
+        }
+    except Exception as e:
+        return fail(action, e, source_product_id, dry_run)
+
+
 @mcp.tool(title="Preview or create WPML product translation", annotations=WRITE)
 async def wpml_create_product_translation(
     source_product_id: Annotated[int, Field(gt=0)],
@@ -271,10 +477,14 @@ async def wpml_create_product_translation(
         if settings.translation_copy_physical_fields:
             for k in ("virtual","downloadable","tax_status","tax_class","weight","dimensions","shipping_class"):
                 if source.get(k) not in (None,""): payload[k] = source[k]
+        # Translation must mirror source inventory state without mutating the source.
+        for k in ("manage_stock","stock_quantity","stock_status","backorders"):
+            if source.get(k) is not None:
+                payload[k] = source[k]
         if translated_category_ids is not None:
             payload["categories"] = [{"id":i} for i in translated_category_ids]
         if source.get("type") == "variable":
-            raise ValueError("Variable product translation requires explicit attribute/variation mapping; use manual content translation first.")
+            raise ValueError("Use wpml_create_variable_product_translation for variable products.")
         if dry_run:
             audit.record(action, target=source_product_id, dry_run=True, payload=payload)
             return {"ok":True,"dry_run":True,"payload":payload}
