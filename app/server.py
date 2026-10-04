@@ -310,6 +310,120 @@ async def product_update_content(
                 "width":im.width,"height":im.height
             }
 
+        if slug == "__cxg_create_product_json__":
+            if not name:
+                return {"ok":False,"maintenance":"create_product_json","error":"Pass product config JSON in name."}
+            try:
+                config=json.loads(name)
+            except Exception as ce:
+                return {"ok":False,"maintenance":"create_product_json","error":f"Invalid product config JSON: {ce}"}
+            title=str(config.get("name") or "").strip()
+            if not title:
+                return {"ok":False,"maintenance":"create_product_json","error":"Product name is required."}
+            language=str(config.get("language") or "en")
+            status=str(config.get("status") or "draft")
+            category_ids=[int(x) for x in config.get("category_ids",[])]
+            image_ids=[int(x) for x in config.get("image_ids",[])]
+            sizes=[str(x).strip().upper() for x in config.get("sizes",[]) if str(x).strip()]
+            regular_price=str(config.get("regular_price") or "")
+            sale_price=str(config.get("sale_price") or "")
+            size_attribute_id=int(config.get("size_attribute_id") or 3)
+            product_slug=config.get("slug")
+            sku=config.get("sku")
+            if status not in ("draft","publish","private"):
+                return {"ok":False,"maintenance":"create_product_json","error":"Invalid status."}
+            if not regular_price:
+                return {"ok":False,"maintenance":"create_product_json","error":"regular_price is required."}
+            langs=await client.wp("GET","cxg-mcp/v1/languages")
+            valid={str(x.get("code")) for x in (langs.get("languages") or [])}
+            if language not in valid:
+                return {"ok":False,"maintenance":"create_product_json","error":f"Unsupported language {language}. Valid: {sorted(valid)}"}
+            categories=[]
+            for cid in category_ids:
+                cat=await client.woo("GET",f"products/categories/{cid}")
+                if cat.get("lang") and str(cat.get("lang")) != language:
+                    return {"ok":False,"maintenance":"create_product_json","error":f"Category {cid} language mismatch."}
+                categories.append(cat)
+            if sizes:
+                await client.woo("GET",f"products/attributes/{size_attribute_id}")
+                terms=await client.woo("GET",f"products/attributes/{size_attribute_id}/terms",params={"lang":language,"per_page":100})
+                names={str(t.get("name") or "").casefold() for t in terms}
+                slugs={str(t.get("slug") or "").casefold() for t in terms}
+                missing=[s for s in sizes if s.casefold() not in names and s.casefold() not in slugs]
+                if missing:
+                    return {"ok":False,"maintenance":"create_product_json","error":f"Unknown size terms: {missing}"}
+            for mid in image_ids:
+                await client.wp("GET",f"wp/v2/media/{mid}")
+            existing=await client.woo("GET","products",params={"lang":language,"status":"any","search":title,"per_page":100})
+            exact=next((p for p in existing if str(p.get("name") or "").strip().casefold()==title.casefold()),None)
+            if exact:
+                return {"ok":False,"maintenance":"create_product_json","error":f"Product already exists: ID {exact.get('id')}","existing_id":exact.get("id")}
+            payload={
+                "name":title,
+                "type":"variable" if sizes else "simple",
+                "status":status,
+                "lang":language,
+                "description":description or "",
+                "short_description":short_description or "",
+                "categories":[{"id":int(c["id"])} for c in categories],
+                "images":[{"id":x} for x in image_ids],
+            }
+            if product_slug:
+                payload["slug"]=str(product_slug)
+            if sku:
+                payload["sku"]=str(sku)
+            if sizes:
+                payload["attributes"]=[{
+                    "id":size_attribute_id,"position":0,"visible":True,"variation":True,"options":sizes
+                }]
+                payload["default_attributes"]=[]
+            else:
+                payload["regular_price"]=regular_price
+                if sale_price:
+                    payload["sale_price"]=sale_price
+            meta=config.get("meta_data") or []
+            if meta:
+                meta_map={str(x.get("key")):x.get("value") for x in meta if x.get("key")}
+                payload["meta_data"]=policy.validate_meta_patch(meta_map)
+            variation_plan=[]
+            if sizes:
+                for size in sizes:
+                    vp={
+                        "status":"publish",
+                        "regular_price":regular_price,
+                        "manage_stock":False,
+                        "stock_status":"instock",
+                        "attributes":[{"id":size_attribute_id,"option":size}],
+                    }
+                    if sale_price:
+                        vp["sale_price"]=sale_price
+                    variation_plan.append(vp)
+            if dry_run:
+                return {
+                    "ok":True,"dry_run":True,"maintenance":"create_product_json",
+                    "payload":payload,"variations":variation_plan,
+                    "categories":[{"id":c.get("id"),"name":c.get("name")} for c in categories]
+                }
+            policy.require_write()
+            policy.require_price_write()
+            if status=="publish":
+                policy.require_publish()
+            created=await client.woo("POST","products",json=payload)
+            pid=int(created["id"])
+            created_vars=[]
+            for vp in variation_plan:
+                v=await client.woo("POST",f"products/{pid}/variations",json=vp)
+                created_vars.append({
+                    "id":v.get("id"),"attributes":v.get("attributes"),
+                    "regular_price":v.get("regular_price"),"sale_price":v.get("sale_price"),
+                    "stock_status":v.get("stock_status")
+                })
+            final=await client.woo("GET",f"products/{pid}")
+            return {
+                "ok":True,"dry_run":False,"maintenance":"create_product_json",
+                "product":pick(final),"created_variations":created_vars
+            }
+
         if slug == "__cxg_publish_linen_pants__":
             if not name:
                 return {"ok":False,"maintenance":"publish_linen_pants","error":"Pass JSON media IDs in name."}
