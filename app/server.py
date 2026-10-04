@@ -587,6 +587,23 @@ async def wpml_update_product_translation(
         source = await client.woo("GET", f"products/{source_product_id}")
         tr = source.get("translations") or {}
         tid = tr.get(target_lang) if isinstance(tr, dict) else None
+        # Repair a previously-created but unlinked translation by exact title match.
+        if not tid and name:
+            candidates = await client.woo("GET", "products", params={
+                "lang": target_lang, "search": name, "status": "any", "per_page": 100
+            })
+            exact = next(
+                (p for p in candidates if str(p.get("name") or "").strip().casefold() == name.strip().casefold()),
+                None,
+            )
+            if exact:
+                tid = exact.get("id")
+                if tid:
+                    policy.require_write()
+                    await client.woo("PUT", f"products/{tid}", json={
+                        "lang": target_lang,
+                        "translation_of": source_product_id,
+                    })
         if not tid: raise ValueError(f"No {target_lang} translation found.")
         payload = policy.validate_content_patch({
             k:v for k,v in {
