@@ -870,13 +870,68 @@ async def product_update_price(
     try:
         payload = {k:v for k,v in {"regular_price":regular_price,"sale_price":sale_price}.items() if v is not None}
         if not payload: raise ValueError("Provide regular_price and/or sale_price.")
+        source = await client.woo("GET", f"products/{product_id}")
+        ids = [int(product_id)]
+        tr = source.get("translations") or {}
+        if isinstance(tr, dict):
+            for v in tr.values():
+                try:
+                    iv = int(v)
+                except Exception:
+                    continue
+                if iv not in ids:
+                    ids.append(iv)
+
+        preview = []
+        for pid in ids:
+            p = await client.woo("GET", f"products/{pid}")
+            vars = []
+            if p.get("type") == "variable":
+                vars = await client.woo("GET", f"products/{pid}/variations", params={"per_page":100})
+            preview.append({
+                "id": pid,
+                "name": p.get("name"),
+                "type": p.get("type"),
+                "variation_count": len(vars),
+            })
         if dry_run:
-            audit.record(action, target=product_id, dry_run=True, payload=payload)
-            return {"ok": True, "dry_run": True, "product_id":product_id, "payload":payload}
+            audit.record(action, target=product_id, dry_run=True, payload={"price":payload,"targets":preview})
+            return {"ok": True, "dry_run": True, "product_id":product_id, "payload":payload, "targets":preview}
+
         policy.require_price_write()
-        data = await client.woo("PUT", f"products/{product_id}", json=payload)
-        audit.record(action, target=product_id, dry_run=False, payload=payload, result={"id":data.get("id")})
-        return {"ok": True, "dry_run": False, "product":pick(data)}
+        results = []
+        for pid in ids:
+            p = await client.woo("GET", f"products/{pid}")
+            parent_result = None
+            if p.get("type") == "simple":
+                parent_result = await client.woo("PUT", f"products/{pid}", json=payload)
+            else:
+                # Keep the variable parent aligned too, even though WooCommerce derives display price from variations.
+                try:
+                    parent_result = await client.woo("PUT", f"products/{pid}", json=payload)
+                except Exception:
+                    parent_result = p
+            changed_vars = []
+            if p.get("type") == "variable":
+                vars = await client.woo("GET", f"products/{pid}/variations", params={"per_page":100})
+                for v in vars:
+                    vp = dict(payload)
+                    updated = await client.woo("PUT", f"products/{pid}/variations/{v['id']}", json=vp)
+                    changed_vars.append({
+                        "id": updated.get("id"),
+                        "regular_price": updated.get("regular_price"),
+                        "sale_price": updated.get("sale_price"),
+                        "price": updated.get("price"),
+                        "attributes": updated.get("attributes"),
+                    })
+            results.append({
+                "id":pid,
+                "name":p.get("name"),
+                "product":pick(parent_result) if isinstance(parent_result, dict) else None,
+                "variations":changed_vars,
+            })
+        audit.record(action, target=product_id, dry_run=False, payload=payload, result={"targets":[x["id"] for x in results]})
+        return {"ok": True, "dry_run": False, "results": results}
     except Exception as e:
         return fail(action, e, product_id, dry_run)
 
