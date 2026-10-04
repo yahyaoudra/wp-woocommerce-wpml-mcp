@@ -351,7 +351,7 @@ async def product_update_content(
                     break
                 for p in rows:
                     pid=int(p.get("id") or 0)
-                    if not pid or pid == 4242:
+                    if not pid or pid in {4242, 737}:
                         continue
                     cats={str(x.get("name") or "") for x in (p.get("categories") or [])}
                     if not (cats & apparel_categories):
