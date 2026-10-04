@@ -34,7 +34,7 @@ class Settings(BaseSettings):
     translation_copy_physical_fields: bool = True
     translation_copy_stock: bool = False
 
-    allowed_meta_keys: str = "rank_math_title,rank_math_description,_yoast_wpseo_title,_yoast_wpseo_metadesc"
+    allowed_meta_keys: str = "rank_math_title,rank_math_description,_yoast_wpseo_title,_yoast_wpseo_metadesc,lifestyle-gallery"
 
     @field_validator("mcp_path")
     @classmethod
