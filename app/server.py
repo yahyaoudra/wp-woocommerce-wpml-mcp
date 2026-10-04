@@ -338,6 +338,99 @@ async def product_update_content(
                     pid, ["S","M","L"], master_regular, master_sale
                 ))})
             return {"ok":True,"maintenance":"normalize_sizes","results":results}
+        if slug == "__cxg_normalize_split_apparel__":
+            apparel_categories = {
+                "T-shirts","Tops","Joggers","Shorts","Hoodies","Bodysuits",
+                "Sweater","Skirt","Bottoms","Swim Shorts"
+            }
+            candidates=[]
+            page=1
+            while True:
+                rows=await client.woo("GET","products",params={"lang":"en","status":"any","per_page":100,"page":page})
+                if not rows:
+                    break
+                for p in rows:
+                    pid=int(p.get("id") or 0)
+                    if not pid or pid == 4242:
+                        continue
+                    cats={str(x.get("name") or "") for x in (p.get("categories") or [])}
+                    if not (cats & apparel_categories):
+                        continue
+                    attrs=p.get("attributes") or []
+                    color_attr=next((a for a in attrs if int(a.get("id") or 0)==1 or str(a.get("name") or "").casefold() in ("color","couleur")),None)
+                    size_attr=next((a for a in attrs if int(a.get("id") or 0)==3 or str(a.get("name") or "").casefold() in ("size","taille")),None)
+                    color_opts=list((color_attr or {}).get("options") or [])
+                    size_opts=[str(x).upper() for x in list((size_attr or {}).get("options") or [])]
+                    is_split_color = color_attr is not None and len(color_opts) <= 1
+                    needs_sizes = p.get("type") == "simple" or is_split_color or (size_attr is not None and set(size_opts) != {"S","M","L"})
+                    if needs_sizes and not (color_attr is not None and len(color_opts) > 1):
+                        candidates.append({
+                            "id":pid,"name":p.get("name"),"type":p.get("type"),
+                            "color_options":color_opts,"size_options":size_opts,
+                            "categories":sorted(cats)
+                        })
+                if len(rows)<100:
+                    break
+                page+=1
+            if dry_run:
+                return {"ok":True,"dry_run":True,"maintenance":"normalize_split_apparel","count":len(candidates),"candidates":candidates}
+            policy.require_write()
+            results=[]
+            for item in candidates:
+                try:
+                    src=await client.woo("GET",f"products/{item['id']}")
+                    master_regular=str(src.get("regular_price") or "")
+                    master_sale=str(src.get("sale_price") or "")
+                    if src.get("type")=="variable":
+                        vs=await client.woo("GET",f"products/{item['id']}/variations",params={"per_page":100})
+                        if vs and not master_regular:
+                            master_regular=str(vs[0].get("regular_price") or "")
+                        if vs and not master_sale:
+                            master_sale=str(vs[0].get("sale_price") or "")
+                    ids2=[item["id"]]
+                    tr=src.get("translations") or {}
+                    if isinstance(tr,dict) and tr.get("fr"):
+                        try:
+                            ids2.insert(0,int(tr["fr"]))
+                        except Exception:
+                            pass
+                    per=[]
+                    for pid2 in ids2:
+                        per.append({"id":pid2, **(await _normalize_product_sizes(pid2,["S","M","L"],master_regular,master_sale))})
+                    results.append({"source_id":item["id"],"ok":True,"results":per})
+                except Exception as ne:
+                    results.append({"source_id":item["id"],"ok":False,"error":str(ne)})
+            return {"ok":all(x.get("ok") for x in results),"maintenance":"normalize_split_apparel","results":results}
+        if slug == "__cxg_sync_all_fr_lifestyle__":
+            page=1
+            synced=[]
+            skipped=[]
+            if not dry_run:
+                policy.require_write()
+            while True:
+                rows=await client.woo("GET","products",params={"lang":"en","status":"any","per_page":100,"page":page})
+                if not rows:
+                    break
+                for p in rows:
+                    pid=int(p.get("id") or 0)
+                    tr=p.get("translations") or {}
+                    tid=tr.get("fr") if isinstance(tr,dict) else None
+                    if not tid:
+                        skipped.append({"id":pid,"reason":"no_fr"})
+                        continue
+                    lifestyle=_meta_value(p,"lifestyle-gallery")
+                    if dry_run:
+                        synced.append({"en_id":pid,"fr_id":int(tid),"value":lifestyle or ""})
+                    else:
+                        try:
+                            data=await client.woo("PUT",f"products/{int(tid)}",json={"meta_data":[{"key":"lifestyle-gallery","value":lifestyle or ""}]})
+                            synced.append({"en_id":pid,"fr_id":int(tid),"value":lifestyle or "","date_modified":data.get("date_modified")})
+                        except Exception as se:
+                            synced.append({"en_id":pid,"fr_id":int(tid),"error":str(se)})
+                if len(rows)<100:
+                    break
+                page+=1
+            return {"ok":not any("error" in x for x in synced),"dry_run":dry_run,"maintenance":"sync_all_fr_lifestyle","count":len(synced),"synced":synced,"skipped":skipped}
         if slug == "__cxg_sync_fr_lifestyle__":
             source = await client.woo("GET", f"products/{product_id}")
             lifestyle = _meta_value(source, "lifestyle-gallery")
