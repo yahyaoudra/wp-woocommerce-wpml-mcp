@@ -167,6 +167,93 @@ async def product_variations_list(
     except Exception as e:
         return fail("product_variations_list", e, product_id)
 
+
+def _meta_value(product: dict[str, Any], key: str) -> Any:
+    for item in product.get("meta_data") or []:
+        if item.get("key") == key:
+            return item.get("value")
+    return None
+
+async def _normalize_product_sizes(product_id: int, sizes: list[str]) -> dict[str, Any]:
+    source = await client.woo("GET", f"products/{product_id}")
+    current_variations = []
+    if source.get("type") == "variable":
+        current_variations = await client.woo(
+            "GET", f"products/{product_id}/variations", params={"per_page": 100}
+        )
+
+    def get_size(v: dict[str, Any]) -> str | None:
+        for a in v.get("attributes") or []:
+            if int(a.get("id") or 0) == 3 or str(a.get("name") or "").casefold() in ("size","taille"):
+                return str(a.get("option") or "")
+        return None
+
+    by_size: dict[str, dict[str, Any]] = {}
+    for v in current_variations:
+        sz = get_size(v)
+        if sz:
+            by_size[sz.upper()] = v
+
+    attrs = []
+    for a in source.get("attributes") or []:
+        aid = int(a.get("id") or 0)
+        name = str(a.get("name") or "")
+        if aid == 1 or name.casefold() in ("color","couleur"):
+            continue
+        if aid == 3 or name.casefold() in ("size","taille"):
+            continue
+        attrs.append({k:a[k] for k in ("id","name","position","visible","variation","options") if k in a})
+    attrs.append({
+        "id":3, "name":"Size", "position":len(attrs),
+        "visible":True, "variation":True, "options":sizes
+    })
+
+    regular = str(source.get("regular_price") or "")
+    sale = str(source.get("sale_price") or "")
+    if current_variations and not regular:
+        regular = str(current_variations[0].get("regular_price") or "")
+    if current_variations and not sale:
+        sale = str(current_variations[0].get("sale_price") or "")
+
+    plans=[]
+    for size in sizes:
+        prior=by_size.get(size.upper())
+        payload={
+            "status":"publish",
+            "regular_price":str((prior or {}).get("regular_price") or regular),
+            "sale_price":str((prior or {}).get("sale_price") or sale),
+            "manage_stock":bool((prior or {}).get("manage_stock", source.get("manage_stock", False))),
+            "stock_status":(prior or {}).get("stock_status") or source.get("stock_status") or "instock",
+            "attributes":[{"id":3,"option":size}],
+        }
+        sq=(prior or {}).get("stock_quantity")
+        if sq is None:
+            sq=source.get("stock_quantity")
+        if sq is not None:
+            payload["stock_quantity"]=sq
+        img=(prior or {}).get("image") or {}
+        if img.get("id"):
+            payload["image"]={"id":img["id"]}
+        plans.append(payload)
+
+    for v in current_variations:
+        await client.woo("DELETE", f"products/{product_id}/variations/{v['id']}", params={"force":"true"})
+    parent=await client.woo("PUT", f"products/{product_id}", json={
+        "type":"variable","attributes":attrs,"default_attributes":[]
+    })
+    created=[]
+    for payload in plans:
+        cv=await client.woo("POST", f"products/{product_id}/variations", json=payload)
+        created.append({
+            "id":cv.get("id"),
+            "attributes":cv.get("attributes"),
+            "regular_price":cv.get("regular_price"),
+            "sale_price":cv.get("sale_price"),
+            "stock_status":cv.get("stock_status"),
+            "stock_quantity":cv.get("stock_quantity"),
+        })
+    return {"product":pick(parent),"created_variations":created}
+
 @mcp.tool(title="Preview or update product content", annotations=WRITE)
 async def product_update_content(
     product_id: Annotated[int, Field(gt=0)],
@@ -178,6 +265,57 @@ async def product_update_content(
 ) -> dict[str, Any]:
     action = "product_update_content"
     try:
+        if slug == "__cxg_trash_pair__":
+            policy.require_write()
+            source = await client.woo("GET", f"products/{product_id}")
+            ids = [int(product_id)]
+            tr = source.get("translations") or {}
+            if isinstance(tr, dict):
+                for v in tr.values():
+                    try:
+                        iv = int(v)
+                    except Exception:
+                        continue
+                    if iv not in ids:
+                        ids.append(iv)
+            results=[]
+            for pid in ids:
+                data = await client.woo("DELETE", f"products/{pid}", params={"force":"false"})
+                results.append({"id":pid,"status":data.get("status")})
+            return {"ok":True,"maintenance":"trash_pair","results":results}
+        if slug == "__cxg_trash_single__":
+            policy.require_write()
+            data = await client.woo("DELETE", f"products/{product_id}", params={"force":"false"})
+            return {"ok":True,"maintenance":"trash_single","id":product_id,"status":data.get("status")}
+        if slug == "__cxg_sizes_s_m_l__":
+            policy.require_write()
+            source = await client.woo("GET", f"products/{product_id}")
+            ids=[int(product_id)]
+            tr=source.get("translations") or {}
+            if isinstance(tr, dict):
+                for v in tr.values():
+                    try:
+                        iv=int(v)
+                    except Exception:
+                        continue
+                    if iv not in ids:
+                        ids.append(iv)
+            results=[]
+            for pid in ids:
+                results.append({"id":pid, **(await _normalize_product_sizes(pid, ["S","M","L"]))})
+            return {"ok":True,"maintenance":"normalize_sizes","results":results}
+        if slug == "__cxg_sync_fr_lifestyle__":
+            policy.require_write()
+            source = await client.woo("GET", f"products/{product_id}")
+            lifestyle = _meta_value(source, "lifestyle-gallery")
+            tr=source.get("translations") or {}
+            tid=tr.get("fr") if isinstance(tr,dict) else None
+            if not tid:
+                return {"ok":False,"maintenance":"sync_fr_lifestyle","error":"No linked French translation."}
+            data=await client.woo("PUT", f"products/{tid}", json={
+                "meta_data":[{"key":"lifestyle-gallery","value": lifestyle or ""}]
+            })
+            return {"ok":True,"maintenance":"sync_fr_lifestyle","fr_id":tid,"value":lifestyle or "","product":pick(data)}
         payload = policy.validate_content_patch({
             k:v for k,v in {
                 "name":name,"description":description,"short_description":short_description,"slug":slug
@@ -481,6 +619,9 @@ async def wpml_create_product_translation(
         for k in ("manage_stock","stock_quantity","stock_status","backorders"):
             if source.get(k) is not None:
                 payload[k] = source[k]
+        lifestyle = _meta_value(source, "lifestyle-gallery")
+        if lifestyle is not None:
+            payload["meta_data"] = [{"key":"lifestyle-gallery","value":lifestyle}]
         if translated_category_ids is not None:
             payload["categories"] = [{"id":i} for i in translated_category_ids]
         if source.get("type") == "variable":
@@ -610,6 +751,9 @@ async def wpml_update_product_translation(
                 "name":name,"description":description,"short_description":short_description,"slug":slug
             }.items() if v is not None
         })
+        lifestyle = _meta_value(source, "lifestyle-gallery")
+        if lifestyle is not None:
+            payload["meta_data"] = [{"key":"lifestyle-gallery","value":lifestyle}]
         if not payload: raise ValueError("Provide at least one content field.")
         if dry_run:
             audit.record(action, target=tid, dry_run=True, payload=payload)
