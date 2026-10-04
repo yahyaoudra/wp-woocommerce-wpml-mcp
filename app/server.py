@@ -370,7 +370,7 @@ async def product_update_content(
                 return {
                     "ok":True,"dry_run":True,"maintenance":"publish_linen_pants",
                     "gallery":gallery,"lifestyle":lifestyle,
-                    "price":{"regular":"650","sale":"549"},
+                    "price":{"regular":"679","sale":"549"},
                     "sizes":["S","M","L"],
                     "categories_en":["Pants","Bottoms","MAN"],
                     "categories_fr":["Pantalons","Bas","Homme"],
@@ -404,7 +404,7 @@ async def product_update_content(
             en_vars=[]
             for size in ["S","M","L"]:
                 v=await client.woo("POST",f"products/{en_id}/variations",json={
-                    "status":"publish","regular_price":"650","sale_price":"549",
+                    "status":"publish","regular_price":"679","sale_price":"549",
                     "manage_stock":False,"stock_status":"instock",
                     "attributes":[{"id":3,"option":size}]
                 })
@@ -436,7 +436,7 @@ async def product_update_content(
             for i,size in enumerate(["S","M","L"]):
                 v=await client.woo("POST",f"products/{fr_id}/variations",json={
                     "lang":"fr","translation_of":en_vars[i].get("id"),
-                    "status":"publish","regular_price":"650","sale_price":"549",
+                    "status":"publish","regular_price":"679","sale_price":"549",
                     "manage_stock":False,"stock_status":"instock",
                     "attributes":[{"id":3,"option":size}]
                 })
@@ -446,7 +446,7 @@ async def product_update_content(
                 "english":{"id":en_id,"name":enp.get("name"),"status":enp.get("status"),"permalink":enp.get("permalink")},
                 "french":{"id":fr_id,"name":frp.get("name"),"status":frp.get("status"),"permalink":frp.get("permalink")},
                 "gallery":gallery,"lifestyle":lifestyle,
-                "price":{"regular":"650","sale":"549"},
+                "price":{"regular":"679","sale":"549"},
                 "sizes":["S","M","L"]
             }
 
