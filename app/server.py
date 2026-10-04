@@ -36,12 +36,12 @@ HIGH = ToolAnnotations(read_only_hint=False, destructive_hint=True, idempotent_h
 SUMMARY_KEYS = (
     "id","name","slug","status","type","sku","price","regular_price","sale_price",
     "stock_status","stock_quantity","manage_stock","lang","translations","permalink",
-    "date_modified","categories","images",
+    "date_created","date_modified","categories","images",
 )
 DETAIL_KEYS = SUMMARY_KEYS + (
     "description","short_description","featured","catalog_visibility","virtual",
     "downloadable","tax_status","tax_class","weight","dimensions","shipping_class",
-    "attributes","default_attributes","parent_id","menu_order",
+    "attributes","default_attributes","parent_id","menu_order","meta_data",
 )
 
 def pick(d: dict[str, Any], keys=DETAIL_KEYS) -> dict[str, Any]:
