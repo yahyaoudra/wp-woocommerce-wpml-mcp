@@ -49,7 +49,10 @@ class Settings(BaseSettings):
 
     @property
     def meta_key_allowlist(self) -> set[str]:
-        return {x.strip() for x in self.allowed_meta_keys.split(",") if x.strip()}
+        keys = {x.strip() for x in self.allowed_meta_keys.split(",") if x.strip()}
+        # Required by the WearInstinct product form custom gallery field.
+        keys.add("lifestyle-gallery")
+        return keys
 
 
 def get_settings() -> Settings:
